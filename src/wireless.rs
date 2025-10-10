@@ -1,14 +1,14 @@
 use esp_idf_svc::{
     bt::{
-        BdAddr, Ble, BtDriver, BtStatus, BtUuid,
         ble::{
             gap::{AdvConfiguration, BleGapEvent, EspBleGap},
             gatt::{
+                server::{EspGatts, GattsEvent},
                 AutoResponse, GattCharacteristic, GattDescriptor, GattId, GattInterface,
                 GattServiceId, GattStatus, Handle, Permission, Property,
-                server::{EspGatts, GattsEvent},
             },
         },
+        BdAddr, Ble, BtDriver, BtStatus, BtUuid,
     },
     sys::EspError,
 };

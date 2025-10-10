@@ -1,5 +1,15 @@
+#![allow(unexpected_cfgs)]
+
 use esp_idf_hal::{delay::FreeRtos, gpio, prelude::*};
+use esp_idf_svc::{
+    bt::{
+        ble::{gap::EspBleGap, gatt::server::EspGatts},
+        Ble, BtDriver,
+    },
+    nvs::EspDefaultNvsPartition,
+};
 use otgi::{obd, wireless};
+use std::sync::Arc;
 
 #[cfg(all(not(esp32s2), feature = "experimental"))]
 fn main() {
@@ -26,7 +36,7 @@ fn main() {
         .unwrap();
 
     let gatts_server = ble_server.clone();
-    gatts_server
+    ble_server
         .gatts
         .subscribe(move |(gatt_intf, event)| {
             gatts_server.handle_gatts_event(gatt_intf, event);
@@ -40,23 +50,39 @@ fn main() {
     let mut high_ref = gpio::PinDriver::output(pins.gpio25).unwrap();
     high_ref.set_high().unwrap();
 
-    let mut driver = obd::ObdDriver::try_new(peripherals.can, pins.gpio33, pins.gpio32, &Default::default()).unwrap();
+    let mut driver = obd::ObdDriver::try_new(
+        peripherals.can,
+        pins.gpio33,
+        pins.gpio32,
+        &Default::default(),
+    )
+    .unwrap();
     driver.start().expect("Failed to start driver");
 
-    let mut data = 0_u16;
+    let mut liters_used: f32 = 0.0;
     loop {
-        log::info!("Run Time: {:?}", driver.query(obd::PID::RunTime));
-        FreeRtos::delay_ms(1000);
-        log::info!("rpm: {:?}", driver.query(obd::PID::EngineSpeed));
-        FreeRtos::delay_ms(1000);
-        log::info!("Speed: {:?}", driver.query(obd::PID::VehicleSpeed));
-        FreeRtos::delay_ms(1000);
-        log::info!("Throttle Position: {:?}", driver.query(obd::PID::ThrottlePosition));
-        FreeRtos::delay_ms(1000);
+        // TODO: See if it's possible to reduce delay
+        let maf = driver.query(obd::PID::MassAirFlow);
+        FreeRtos::delay_ms(100);
+        let stft = driver.query(obd::PID::ShortTermFuelTrimBankOne);
+        FreeRtos::delay_ms(100);
+        let ltft = driver.query(obd::PID::LongTermFuelTrimBankOne);
+        FreeRtos::delay_ms(100);
 
-        // TODO: send actual data
-        ble_server.indicate(&data.to_le_bytes()).unwrap();
-        data += 1;
+        if let (Ok(maf), Ok(stft), Ok(ltft)) = (maf, stft, ltft) {
+            let usage = (maf * 3600.0) / ((14.7 * (1.0 + ((stft + ltft) / 100.0))) * 740.0);
+            liters_used += (usage / 3600.0) * 0.3; // rough approximation (300 ms)
+            log::info!(
+                "Estimated fuel usage (L/h): {:?}; {:?} liters used in total",
+                usage,
+                liters_used
+            );
+        }
+
+        // UNTESTED
+        ble_server
+            .indicate(&(liters_used as u16).to_le_bytes())
+            .unwrap();
     }
 }
 

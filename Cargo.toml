@@ -24,7 +24,7 @@ experimental = ["esp-idf-svc/experimental"]
 
 [dependencies]
 log = "0.4"
-esp-idf-svc = "0.51"
+esp-idf-svc = { version = "0.51", features = ["alloc", "experimental"] }
 esp-idf-hal = "0.45.2"
 strum = { version = "0.27.2", features = ["derive"] }
 

@@ -1,8 +1,7 @@
 use esp_idf_hal::{
-    can,
+    can, delay,
     gpio::{InputPin, OutputPin},
     peripheral::Peripheral,
-    delay,
     sys::EspError,
 };
 
@@ -10,30 +9,52 @@ use esp_idf_hal::{
 fn human_readable(data: &[u8], format: PID) -> Result<f32, ()> {
     match format {
         PID::EngineFuelRate => {
-            if data.len() < 2 { return Err(()) }
+            if data.len() < 2 {
+                return Err(());
+            }
             Ok((256.0 * (data[0] as f32) + (data[1] as f32)) / 20.0)
         } // (256A + B) / 20
         PID::EngineSpeed => {
-            if data.len() < 2 { return Err(()) }
+            if data.len() < 2 {
+                return Err(());
+            }
             Ok((256.0 * (data[0] as f32) + (data[1] as f32)) / 4.0)
         } // (256A + B)/4
         PID::RunTime => {
-            if data.len() < 2 { return Err(()) }
+            if data.len() < 2 {
+                return Err(());
+            }
             Ok(256.0 * (data[0] as f32) + (data[1] as f32))
         } // 256A + B
-        PID::VehicleSpeed => { 
-            if data.len() < 1 { return Err(()) }
+        PID::VehicleSpeed => {
+            if data.len() < 1 {
+                return Err(());
+            }
             Ok(data[0] as f32)
         }
         PID::ThrottlePosition | PID::FuelTankLevelInput | PID::RelativeThrottlePosition => {
-            if data.len() < 1 { return Err(()) }
+            if data.len() < 1 {
+                return Err(());
+            }
             Ok((data[0] as f32) / 2.55)
         } // A/2.55
         PID::Odometer => {
-            if data.len() < 4 { return Err(()) }
-            Ok(((data[0] as f32) * 2.0_f32.powi(24) + (data[1] as f32) * 2.0_f32.powi(16) + (data[2] as f32) * 2.0_f32.powi(8) + (data[3] as f32)) / 10.0_f32)
+            if data.len() < 4 {
+                return Err(());
+            }
+            Ok(((data[0] as f32) * 2.0_f32.powi(24)
+                + (data[1] as f32) * 2.0_f32.powi(16)
+                + (data[2] as f32) * 2.0_f32.powi(8)
+                + (data[3] as f32))
+                / 10.0_f32)
         } // (A(2^24) + B (2^16) + C (2^8) + D) / 10
-        _ => {Err(())}
+        PID::ShortTermFuelTrimBankOne | PID::LongTermFuelTrimBankOne => {
+            if data.len() < 1 {
+                return Err(());
+            }
+            Ok(((data[0] as f32) / 1.28) - 100.0)
+        }
+        _ => Err(()),
     }
 }
 
@@ -50,6 +71,9 @@ pub enum PID {
     RelativeThrottlePosition = 0x45,
     EngineFuelRate = 0x5E,
     Odometer = 0xA6,
+    MassAirFlow = 0x10,
+    ShortTermFuelTrimBankOne = 0x06,
+    LongTermFuelTrimBankOne = 0x07,
     // TODO: additional PID's
 }
 
@@ -62,7 +86,7 @@ impl From<PID> for u8 {
 #[derive(Debug, Clone)]
 pub enum ObdError {
     Esp(EspError),
-    MalformedResponse
+    MalformedResponse,
 }
 
 impl From<EspError> for ObdError {
@@ -83,7 +107,7 @@ pub enum ObdMode {
 
 struct ObdRequest<'a> {
     mode: ObdMode,
-    data: &'a [PID]
+    data: &'a [PID],
 }
 
 impl<'a> ObdRequest<'a> {
@@ -91,14 +115,21 @@ impl<'a> ObdRequest<'a> {
         let bytes_follow = self.data.len() + 1;
 
         if bytes_follow > 0x07 {
-            return Err(()) 
+            return Err(());
         }
 
         // TODO: make assembly more efficient
         let mut msg: [u8; 8] = [0; 8];
-        msg[0] = bytes_follow as u8; 
+        msg[0] = bytes_follow as u8;
         msg[1] = self.mode as u8;
-        msg[2..2 + self.data.len()].copy_from_slice(&self.data.iter().cloned().map(|e| e as u8).collect::<Vec<u8>>());
+        msg[2..2 + self.data.len()].copy_from_slice(
+            &self
+                .data
+                .iter()
+                .cloned()
+                .map(|e| e as u8)
+                .collect::<Vec<u8>>(),
+        );
 
         Ok(msg)
     }
@@ -129,16 +160,16 @@ impl<'a> ObdDriver<'a> {
     ) -> Result<Self, ObdError> {
         Ok(Self {
             can_driver: can::CanDriver::new(
-                            can,
-                            tx,
-                            rx,
-                            &can::config::Config::new()
-                            .filter(can::config::Filter::Standard {
-                                filter: 0x7E0,
-                                mask: 0xFF0,
-                            })
-                            .timing(config.timing),
-                        )?,
+                can,
+                tx,
+                rx,
+                &can::config::Config::new()
+                    .filter(can::config::Filter::Standard {
+                        filter: 0x7E0,
+                        mask: 0xFF0,
+                    })
+                    .timing(config.timing),
+            )?,
         })
     }
 
@@ -147,11 +178,24 @@ impl<'a> ObdDriver<'a> {
     }
 
     pub fn query(&mut self, pid: PID) -> Result<f32, ObdError> {
-        let tx_frame = can::Frame::new(0x7df, can::Flags::None.into(), &(ObdRequest { mode: ObdMode::QueryNow, data: &[pid] }).assemble().unwrap()).unwrap();
+        let tx_frame = can::Frame::new(
+            0x7df,
+            can::Flags::None.into(),
+            &(ObdRequest {
+                mode: ObdMode::QueryNow,
+                data: &[pid],
+            })
+            .assemble()
+            .unwrap(),
+        )
+        .unwrap();
 
-        self.can_driver.transmit(&tx_frame, delay::TickType::new_millis(100).into())?;
+        self.can_driver
+            .transmit(&tx_frame, delay::TickType::new_millis(100).into())?;
 
-        let rx_frame = self.can_driver.receive(delay::TickType::new_millis(100).into())?;
+        let rx_frame = self
+            .can_driver
+            .receive(delay::TickType::new_millis(100).into())?;
 
         if rx_frame.data()[1..3] != [0x40 + ObdMode::QueryNow as u8, pid as u8] {
             log::error!("Picked up the wrong packet: {:?}", rx_frame.data());
@@ -171,7 +215,7 @@ impl<'a> ObdDriver<'a> {
         // TODO: needs to handle multiple modes; make more idiomatic
         match human_readable(data, pid) {
             Ok(res) => Ok(res),
-            Err(()) => Err(ObdError::MalformedResponse)
+            Err(()) => Err(ObdError::MalformedResponse),
         }
     }
 
