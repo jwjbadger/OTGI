@@ -27,6 +27,7 @@ log = "0.4"
 esp-idf-svc = { version = "0.51", features = ["alloc", "experimental"] }
 esp-idf-hal = "0.45.2"
 strum = { version = "0.27.2", features = ["derive"] }
+enumset = "1.1.10"
 
 # --- Optional Embassy Integration ---
 # esp-idf-svc = { version = "0.51", features = ["critical-section", "embassy-time-driver", "embassy-sync"] }
