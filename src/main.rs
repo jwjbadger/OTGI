@@ -1,10 +1,10 @@
 use esp_idf_hal::{delay::FreeRtos, gpio, prelude::*};
 use esp_idf_svc::{
     bt::{
-        ble::{gap::EspBleGap, gatt::server::EspGatts},
+        ble::{gap::EspBleGap, gatt::{Permission, Property, server::EspGatts}},
         Ble, BtDriver, BtUuid,
     },
-    nvs::{self, EspDefaultNvsPartition},
+    nvs::EspDefaultNvsPartition,
 };
 use otgi::{obd, wireless};
 use std::sync::Arc;
@@ -41,26 +41,24 @@ fn main() {
     };*/
     let runcount = 0;
 
+    let mut liters_used: f32 = 0.0;
+
+    let characteristic_uuid = BtUuid::uuid128(IND_CHARACTERISTIC_UUID);
     let ble_server = wireless::Server::new(
         Arc::new(EspBleGap::new(bt.clone()).unwrap()),
         Arc::new(EspGatts::new(bt.clone()).unwrap()),
         wireless::ServerConfiguration {
-            services: vec![
-                wireless::ServiceDescriptor {
-                    uuid: BtUuid::uuid128(SERVICE_UUID),
-                    is_primary: true
-                }
-            ],
-            characteristics: vec![
-                wireless::CharacteristicDescriptor {
-                    uuid: BtUuid::uuid128(IND_CHARACTERISTIC_UUID),
-                    service_uuid: BtUuid::uuid128(SERVICE_UUID),
+            services: vec![wireless::ServiceDescriptor {
+                uuid: BtUuid::uuid128(SERVICE_UUID),
+                is_primary: true,
+                characteristics: vec![wireless::CharacteristicDescriptor {
+                    uuid: characteristic_uuid.clone(),
                     permissions: (Permission::Write | Permission::Read).into(),
                     properties: (Property::Indicate).into(),
                     max_len: 200,
-                    data: liters_used.to_le_bytes()
-                }
-            ],
+                    data: liters_used.to_le_bytes().to_vec(),
+                }],
+            }],
             name: "OTGI",
         },
     );
@@ -71,7 +69,7 @@ fn main() {
         .subscribe(move |event| {
             gap_server.handle_gap_event(event);
         })
-        .unwrap();
+    .unwrap();
 
     let gatts_server = ble_server.clone();
     ble_server
@@ -79,7 +77,7 @@ fn main() {
         .subscribe(move |(gatt_intf, event)| {
             gatts_server.handle_gatts_event(gatt_intf, event);
         })
-        .unwrap();
+    .unwrap();
 
     ble_server.gatts.register_app(wireless::APP_ID).unwrap();
 
@@ -94,10 +92,9 @@ fn main() {
         pins.gpio32,
         &Default::default(),
     )
-    .unwrap();
+        .unwrap();
     driver.start().expect("Failed to start driver");
 
-    let mut liters_used: f32 = 0.0;
     loop {
         // TODO: See if it's possible to reduce delay
         let maf = driver.query(obd::PID::MassAirFlow);
@@ -118,7 +115,6 @@ fn main() {
         }
 
         // UNTESTED
-        liters_used += 0.1;
-        ble_server.indicate(&liters_used.to_le_bytes()).unwrap();
+        ble_server.indicate(&characteristic_uuid, &liters_used.to_le_bytes()).unwrap();
     }
 }

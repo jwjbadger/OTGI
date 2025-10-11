@@ -35,27 +35,41 @@ struct Connection {
     conn_id: Handle,
 }
 
+#[derive(Debug, Clone)]
+struct Service {
+    uuid: BtUuid,
+    handle: Handle,
+    characteristics: Vec<Characteristic>
+}
+
+#[derive(Debug, Clone)]
+struct Characteristic {
+    uuid: BtUuid,
+    handle: Handle
+}
+
 #[derive(Debug, Default)]
 struct State {
     connections: Vec<Connection>,
-    ind_handle: Option<Handle>,
+    services: Vec<Service>,
+    //ind_handle: Option<Handle>,
     gatt_intf: Option<GattInterface>,
     ind_confirmed: Option<BdAddr>,
-    service_handle: Option<Handle>,
+    //service_handle: Option<Handle>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ServiceDescriptor {
     pub uuid: BtUuid, // I see no usage for the instance id so it will be hardcoded 0 unless I
     // learn what its purpose is
     pub is_primary: bool, // This will not be verified; the system will likely panic if you make two
-                          // things primary, and that is perfectly acceptable
+    // things primary, and that is perfectly acceptable
+    pub characteristics: Vec<CharacteristicDescriptor>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct CharacteristicDescriptor {
     pub uuid: BtUuid,
-    pub service_uuid: BtUuid,
     pub permissions: EnumSet<Permission>,
     pub properties: EnumSet<Property>,
     pub max_len: usize, // number of bytes
@@ -65,7 +79,6 @@ pub struct CharacteristicDescriptor {
 #[derive(Clone)]
 pub struct ServerConfiguration {
     pub services: Vec<ServiceDescriptor>,
-    pub characteristics: Vec<CharacteristicDescriptor>,
     pub name: &'static str,
 }
 
@@ -73,7 +86,6 @@ impl Default for ServerConfiguration {
     fn default() -> Self {
         Self {
             services: vec![], // As of now, only one service should be created
-            characteristics: vec![],
             name: "esp32",
         }
     }
@@ -128,7 +140,15 @@ impl Server {
                             // Or generally everything indirectly interfaces with a human
                             appearance: AppearanceCategory::HumanInterfaceDevice,
                             flag: 2,
-                            service_uuid: Some(self.config.services.iter().filter(|s| s.is_primary == true).next().expect("No primary service").uuid), // TODO: primary
+                            service_uuid: Some(
+                                self.config
+                                    .services
+                                    .iter()
+                                    .filter(|s| s.is_primary == true)
+                                    .next()
+                                    .expect("No primary service")
+                                    .uuid.clone(),
+                            ), // TODO: primary
                             // service
                             ..Default::default()
                         })
@@ -163,28 +183,35 @@ impl Server {
                     panic!("Failed to create GATT service: {:?}", status);
                 }
 
-                self.state.lock().unwrap().service_handle = Some(service_handle);
+                self.state.lock().unwrap().services.push(Service {
+                   handle: service_handle,
+                   uuid: service_id.id.uuid.clone(),
+                   characteristics: vec![]
+                });
+
                 self.gatts.start_service(service_handle).unwrap();
 
                 self.config
-                    .characteristics
+                    .services
                     .iter()
-                    .filter(|char| char.service_uuid == service_id.id.uuid)
-                    .for_each(|char| {
-                        self.gatts
-                            .add_characteristic(
-                                service_handle,
-                                &GattCharacteristic {
-                                    uuid: char.uuid.clone(),
-                                    permissions: char.permissions,
-                                    properties: char.properties,
-                                    max_len: char.max_len,
-                                    auto_rsp: AutoResponse::ByApp, // I see no forseeable reason to ever
-                                                                   // change this
-                                },
-                                char.data.as_slice(),
-                            )
-                            .unwrap();
+                    .filter(|s| s.uuid == service_id.id.uuid)
+                    .for_each(|s| {
+                        s.characteristics.iter().for_each(|char| {
+                            self.gatts
+                                .add_characteristic(
+                                    service_handle,
+                                    &GattCharacteristic {
+                                        uuid: char.uuid.clone(),
+                                        permissions: char.permissions,
+                                        properties: char.properties,
+                                        max_len: char.max_len,
+                                        auto_rsp: AutoResponse::ByApp, // I see no forseeable reason to ever
+                                                                       // change this
+                                    },
+                                    char.data.as_slice(),
+                                )
+                                .unwrap();
+                        });
                     });
             }
             GattsEvent::PeerConnected { conn_id, addr, .. } => {
@@ -195,6 +222,7 @@ impl Server {
                         conn_id,
                     });
 
+                    // min_int_ms, max_int_ms, latency_ms, timeout_ms
                     self.gap.set_conn_params_conf(addr, 10, 20, 0, 400).unwrap();
                 }
             }
@@ -210,21 +238,22 @@ impl Server {
 
                 let mut state = self.state.lock().unwrap();
 
-                if state.service_handle == Some(service_handle)
-                    && char_uuid == BtUuid::uuid128(IND_CHARACTERISTIC_UUID)
-                {
-                    state.ind_handle = Some(attr_handle);
+                state.services.iter_mut().filter(|s| s.handle == service_handle).next().expect("Characteristic added on service that doesn't exist").characteristics.push(Characteristic {
+                    handle: attr_handle,
+                    uuid: char_uuid
+                });
 
-                    self.gatts
-                        .add_descriptor(
-                            service_handle,
-                            &GattDescriptor {
-                                uuid: BtUuid::uuid16(0x2902), // CCCD
-                                permissions: (Permission::Read | Permission::Write).into(),
-                            },
-                        )
-                        .unwrap();
-                }
+                self.gatts
+                    .add_descriptor(
+                        service_handle,
+                        &GattDescriptor {
+                            uuid: BtUuid::uuid16(0x2902), // CCCD: Client Characteristic
+                                                          // Configuration Descriptor
+                            // TODO: should this have the same permissions as the characteristic?
+                            permissions: (Permission::Read | Permission::Write).into(),
+                        },
+                    )
+                    .unwrap();
             }
             GattsEvent::PeerDisconnected { addr, .. } => {
                 let mut state = self.state.lock().unwrap();
@@ -251,8 +280,9 @@ impl Server {
         }
     }
 
-    pub fn indicate(&self, data: &[u8]) -> Result<(), EspError> {
+    pub fn indicate(&self, characteristic_uuid: &BtUuid, data: &[u8]) -> Result<(), EspError> {
         let mut state = self.state.lock().unwrap();
+        let ind_handle = state.services.iter().find(|s| s.characteristics.iter().find(|char| char.uuid == *characteristic_uuid).is_some()).expect("Requested characteristic that doesn't exist").characteristics.iter().find(|char| char.uuid == *characteristic_uuid).unwrap().handle;
 
         for i in 0..state.connections.len() {
             if state.ind_confirmed.is_some() {
@@ -262,7 +292,7 @@ impl Server {
             self.gatts.indicate(
                 state.gatt_intf.expect("No GATT interface"),
                 state.connections[i].conn_id,
-                state.ind_handle.expect("No indicate handle"),
+                ind_handle,
                 data,
             )?;
 
