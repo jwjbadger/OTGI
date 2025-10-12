@@ -6,14 +6,14 @@ use esp_idf_svc::{
             gatt::{
                 server::{EspGatts, GattsEvent},
                 AutoResponse, GattCharacteristic, GattDescriptor, GattId, GattInterface,
-                GattServiceId, GattStatus, Handle, Permission, Property,
+                GattResponse, GattServiceId, GattStatus, Handle, Permission, Property,
             },
         },
         BdAddr, Ble, BtDriver, BtStatus, BtUuid,
     },
     sys::EspError,
 };
-use log::info;
+use log::{self, info};
 use std::sync::{Arc, Condvar, Mutex};
 
 // TODO: Determine proper IDs
@@ -35,17 +35,19 @@ struct Connection {
     conn_id: Handle,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct Service {
     uuid: BtUuid,
     handle: Handle,
-    characteristics: Vec<Characteristic>
+    characteristics: Vec<Characteristic>,
 }
 
 #[derive(Debug, Clone)]
 struct Characteristic {
     uuid: BtUuid,
-    handle: Handle
+    handle: Handle,
+    data: Vec<u8>,
 }
 
 #[derive(Debug, Default)]
@@ -116,7 +118,7 @@ impl Server {
                 self.gap.start_advertising().unwrap();
             }
             _ => {
-                info!("Received GAP event: {:?}", event)
+                log::warn!("Received GAP event: {:?}", event)
             }
         }
     }
@@ -144,10 +146,10 @@ impl Server {
                                 self.config
                                     .services
                                     .iter()
-                                    .filter(|s| s.is_primary == true)
-                                    .next()
+                                    .find(|s| s.is_primary)
                                     .expect("No primary service")
-                                    .uuid.clone(),
+                                    .uuid
+                                    .clone(),
                             ), // TODO: primary
                             // service
                             ..Default::default()
@@ -184,9 +186,9 @@ impl Server {
                 }
 
                 self.state.lock().unwrap().services.push(Service {
-                   handle: service_handle,
-                   uuid: service_id.id.uuid.clone(),
-                   characteristics: vec![]
+                    handle: service_handle,
+                    uuid: service_id.id.uuid.clone(),
+                    characteristics: vec![],
                 });
 
                 self.gatts.start_service(service_handle).unwrap();
@@ -238,19 +240,37 @@ impl Server {
 
                 let mut state = self.state.lock().unwrap();
 
-                state.services.iter_mut().filter(|s| s.handle == service_handle).next().expect("Characteristic added on service that doesn't exist").characteristics.push(Characteristic {
-                    handle: attr_handle,
-                    uuid: char_uuid
-                });
+                state
+                    .services
+                    .iter_mut()
+                    .find(|s| s.handle == service_handle)
+                    .expect("Characteristic added on service that doesn't exist")
+                    .characteristics
+                    .push(Characteristic {
+                        handle: attr_handle,
+                        uuid: char_uuid.clone(),
+                        data: self
+                            .config
+                            .services
+                            .iter()
+                            .find(|s| s.characteristics.iter().any(|char| char.uuid == char_uuid))
+                            .unwrap()
+                            .characteristics
+                            .iter()
+                            .find(|char| char.uuid == char_uuid)
+                            .unwrap()
+                            .data
+                            .clone(),
+                    });
 
                 self.gatts
                     .add_descriptor(
                         service_handle,
                         &GattDescriptor {
                             uuid: BtUuid::uuid16(0x2902), // CCCD: Client Characteristic
-                                                          // Configuration Descriptor
+                            // Configuration Descriptor
                             // TODO: should this have the same permissions as the characteristic?
-                            permissions: (Permission::Read | Permission::Write).into(),
+                            permissions: (Permission::Read | Permission::Write),
                         },
                     )
                     .unwrap();
@@ -272,17 +292,71 @@ impl Server {
                 state.ind_confirmed = None;
                 self.cvar.notify_all();
 
-                info!("Received confirmation from device");
+                //info!("Received confirmation from device");
+            }
+            GattsEvent::Read {
+                conn_id,
+                trans_id,
+                addr,
+                handle,
+                offset,
+                is_long,
+                ..
+            } => {
+                log::warn!(
+                    "Requested: {:?}, {:?}, {:?}, {:?}",
+                    addr,
+                    handle,
+                    offset,
+                    is_long
+                );
+                let state = self.state.lock().unwrap();
+                let data = state
+                    .services
+                    .iter()
+                    .find(|s| s.characteristics.iter().any(|char| char.handle == handle))
+                    .expect("Requested characteristic that doesn't exist")
+                    .characteristics
+                    .iter()
+                    .find(|char| char.handle == handle)
+                    .unwrap()
+                    .data
+                    .as_slice();
+
+                self.gatts
+                    .send_response(
+                        state.gatt_intf.unwrap(),
+                        conn_id,
+                        trans_id,
+                        GattStatus::Ok,
+                        Some(GattResponse::new().value(data).unwrap()),
+                    )
+                    .unwrap();
             }
             _ => {
-                info!("Received GATT event: {:?}", event)
+                log::warn!("Received GATT event: {:?}", event)
             }
         }
     }
 
     pub fn indicate(&self, characteristic_uuid: &BtUuid, data: &[u8]) -> Result<(), EspError> {
         let mut state = self.state.lock().unwrap();
-        let ind_handle = state.services.iter().find(|s| s.characteristics.iter().find(|char| char.uuid == *characteristic_uuid).is_some()).expect("Requested characteristic that doesn't exist").characteristics.iter().find(|char| char.uuid == *characteristic_uuid).unwrap().handle;
+        let characteristic = state
+            .services
+            .iter_mut()
+            .find(|s| {
+                s.characteristics
+                    .iter()
+                    .any(|char| char.uuid == *characteristic_uuid)
+            })
+            .expect("Requested characteristic that doesn't exist")
+            .characteristics
+            .iter_mut()
+            .find(|char| char.uuid == *characteristic_uuid)
+            .unwrap();
+
+        characteristic.data = data.to_vec();
+        let handle = characteristic.handle;
 
         for i in 0..state.connections.len() {
             if state.ind_confirmed.is_some() {
@@ -292,13 +366,13 @@ impl Server {
             self.gatts.indicate(
                 state.gatt_intf.expect("No GATT interface"),
                 state.connections[i].conn_id,
-                ind_handle,
+                handle,
                 data,
             )?;
 
             state.ind_confirmed = Some(state.connections[i].peer);
 
-            info!("Indicated data to {}", state.connections[i].peer);
+            //info!("Indicated data to {}", state.connections[i].peer);
         }
 
         Ok(())

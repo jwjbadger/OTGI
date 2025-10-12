@@ -8,6 +8,12 @@ use esp_idf_hal::{
 // TODO: more idiomatic
 fn human_readable(data: &[u8], format: PID) -> Result<f32, ()> {
     match format {
+        PID::MassAirFlow => {
+            if data.len() < 2 {
+                return Err(());
+            }
+            Ok((256.0 * (data[0] as f32) + (data[1] as f32)) / 100.0)
+        } // (256A + B) / 100
         PID::EngineFuelRate => {
             if data.len() < 2 {
                 return Err(());
@@ -27,13 +33,13 @@ fn human_readable(data: &[u8], format: PID) -> Result<f32, ()> {
             Ok(256.0 * (data[0] as f32) + (data[1] as f32))
         } // 256A + B
         PID::VehicleSpeed => {
-            if data.len() < 1 {
+            if data.is_empty() {
                 return Err(());
             }
             Ok(data[0] as f32)
         }
         PID::ThrottlePosition | PID::FuelTankLevelInput | PID::RelativeThrottlePosition => {
-            if data.len() < 1 {
+            if data.is_empty() {
                 return Err(());
             }
             Ok((data[0] as f32) / 2.55)
@@ -49,7 +55,7 @@ fn human_readable(data: &[u8], format: PID) -> Result<f32, ()> {
                 / 10.0_f32)
         } // (A(2^24) + B (2^16) + C (2^8) + D) / 10
         PID::ShortTermFuelTrimBankOne | PID::LongTermFuelTrimBankOne => {
-            if data.len() < 1 {
+            if data.is_empty() {
                 return Err(());
             }
             Ok(((data[0] as f32) / 1.28) - 100.0)

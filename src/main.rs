@@ -1,7 +1,12 @@
+#![allow(clippy::uninlined_format_args)]
+
 use esp_idf_hal::{delay::FreeRtos, gpio, prelude::*};
 use esp_idf_svc::{
     bt::{
-        ble::{gap::EspBleGap, gatt::{Permission, Property, server::EspGatts}},
+        ble::{
+            gap::EspBleGap,
+            gatt::{server::EspGatts, Permission, Property},
+        },
         Ble, BtDriver, BtUuid,
     },
     nvs::EspDefaultNvsPartition,
@@ -10,7 +15,8 @@ use otgi::{obd, wireless};
 use std::sync::Arc;
 
 const SERVICE_UUID: u128 = 0x2cbc6002370f577a928681e04f368400;
-const IND_CHARACTERISTIC_UUID: u128 = 0x56c46fef90390803a71feebcc8650e43;
+const FUEL_USAGE_CHARACTERISTIC_UUID: u128 = 0x56c46fef90390803a71feebcc8650e43;
+const RUNCOUNT_CHARACTERISTIC_UUID: u128 = 0xed0cdaa9fc55c2c193a061b6e1f36720;
 
 fn main() {
     esp_idf_svc::sys::link_patches();
@@ -39,11 +45,12 @@ fn main() {
         nvs_namespace.set_u64("runcount", rc + 1);
         rc + 1
     };*/
-    let runcount = 0;
+    let runcount: u64 = 4;
 
     let mut liters_used: f32 = 0.0;
 
-    let characteristic_uuid = BtUuid::uuid128(IND_CHARACTERISTIC_UUID);
+    let fuel_usage_uuid = BtUuid::uuid128(FUEL_USAGE_CHARACTERISTIC_UUID);
+    let runcount_uuid = BtUuid::uuid128(RUNCOUNT_CHARACTERISTIC_UUID);
     let ble_server = wireless::Server::new(
         Arc::new(EspBleGap::new(bt.clone()).unwrap()),
         Arc::new(EspGatts::new(bt.clone()).unwrap()),
@@ -51,13 +58,22 @@ fn main() {
             services: vec![wireless::ServiceDescriptor {
                 uuid: BtUuid::uuid128(SERVICE_UUID),
                 is_primary: true,
-                characteristics: vec![wireless::CharacteristicDescriptor {
-                    uuid: characteristic_uuid.clone(),
-                    permissions: (Permission::Write | Permission::Read).into(),
-                    properties: (Property::Indicate).into(),
-                    max_len: 200,
-                    data: liters_used.to_le_bytes().to_vec(),
-                }],
+                characteristics: vec![
+                    wireless::CharacteristicDescriptor {
+                        uuid: fuel_usage_uuid.clone(),
+                        permissions: Permission::Write | Permission::Read,
+                        properties: Property::Indicate.into(),
+                        max_len: 200,
+                        data: liters_used.to_le_bytes().to_vec(),
+                    },
+                    wireless::CharacteristicDescriptor {
+                        uuid: runcount_uuid.clone(),
+                        permissions: Permission::Write | Permission::Read,
+                        properties: Property::Indicate | Property::Read,
+                        max_len: 200,
+                        data: runcount.to_le_bytes().to_vec(),
+                    },
+                ],
             }],
             name: "OTGI",
         },
@@ -69,7 +85,7 @@ fn main() {
         .subscribe(move |event| {
             gap_server.handle_gap_event(event);
         })
-    .unwrap();
+        .unwrap();
 
     let gatts_server = ble_server.clone();
     ble_server
@@ -77,7 +93,7 @@ fn main() {
         .subscribe(move |(gatt_intf, event)| {
             gatts_server.handle_gatts_event(gatt_intf, event);
         })
-    .unwrap();
+        .unwrap();
 
     ble_server.gatts.register_app(wireless::APP_ID).unwrap();
 
@@ -92,7 +108,7 @@ fn main() {
         pins.gpio32,
         &Default::default(),
     )
-        .unwrap();
+    .unwrap();
     driver.start().expect("Failed to start driver");
 
     loop {
@@ -115,6 +131,8 @@ fn main() {
         }
 
         // UNTESTED
-        ble_server.indicate(&characteristic_uuid, &liters_used.to_le_bytes()).unwrap();
+        ble_server
+            .indicate(&fuel_usage_uuid, &liters_used.to_le_bytes())
+            .unwrap();
     }
 }
