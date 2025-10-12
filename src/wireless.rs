@@ -118,7 +118,7 @@ impl Server {
                 self.gap.start_advertising().unwrap();
             }
             _ => {
-                log::warn!("Received GAP event: {:?}", event)
+                info!("Received GAP event: {:?}", event)
             }
         }
     }
@@ -297,19 +297,9 @@ impl Server {
             GattsEvent::Read {
                 conn_id,
                 trans_id,
-                addr,
                 handle,
-                offset,
-                is_long,
                 ..
             } => {
-                log::warn!(
-                    "Requested: {:?}, {:?}, {:?}, {:?}",
-                    addr,
-                    handle,
-                    offset,
-                    is_long
-                );
                 let state = self.state.lock().unwrap();
                 let data = state
                     .services
@@ -334,7 +324,7 @@ impl Server {
                     .unwrap();
             }
             _ => {
-                log::warn!("Received GATT event: {:?}", event)
+                info!("Received GATT event: {:?}", event)
             }
         }
     }
