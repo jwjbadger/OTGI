@@ -29,7 +29,6 @@ fn main() {
         Arc::new(BtDriver::<Ble>::new(peripherals.modem, Some(nvs_partition.clone())).unwrap());
     let pins = peripherals.pins;
 
-    // Commenting this out until absolutely necessary to reduce the write count to nvs
     let nvs_namespace = match nvs::EspNvs::new(nvs_partition, "otgi_data", true) {
         Ok(nvs) => nvs,
         Err(e) => panic!("Could't get namespace {e:?}"),
@@ -121,39 +120,62 @@ fn main() {
 
     let mut timer_enabled = false;
 
+    let stft_query = obd::ObdQuery::new(
+        obd::ObdMode::QueryNow,
+        Some(obd::PID::ShortTermFuelTrimBankOne),
+    );
+    let ltft_query = obd::ObdQuery::new(
+        obd::ObdMode::QueryNow,
+        Some(obd::PID::ShortTermFuelTrimBankOne),
+    );
+    let maf_query = obd::ObdQuery::new(
+        obd::ObdMode::QueryNow,
+        Some(obd::PID::ShortTermFuelTrimBankOne),
+    );
+
     loop {
         let mut time = timer.counter().unwrap() as f64 / timer_hz;
         // Update stft at 5 Hz
         if timer_enabled && time > stft_last_updated + 0.2 {
-            stft = driver
-                .query(obd::PID::ShortTermFuelTrimBankOne)
-                .unwrap_or(0.0);
-            log::info!("Updated stft");
-            stft_last_updated = time;
-            FreeRtos::delay_ms(50);
-            time = timer.counter().unwrap() as f64 / timer_hz;
+            if let Ok(obd::ObdReadableData::SignedPercentage(stft_res)) = driver.query(&stft_query)
+            {
+                stft = stft_res;
+                log::info!("Updated stft: {:?}", stft);
+                stft_last_updated = time;
+                FreeRtos::delay_ms(50);
+                time = timer.counter().unwrap() as f64 / timer_hz;
+            }
         }
 
         // Update ltft at 1 Hz
         if timer_enabled && time > ltft_last_updated + 1.0 {
-            ltft = driver
-                .query(obd::PID::LongTermFuelTrimBankOne)
-                .unwrap_or(0.0);
-            log::info!("Updated ltft");
-            ltft_last_updated = time;
-            FreeRtos::delay_ms(50);
+            if let Ok(obd::ObdReadableData::SignedPercentage(ltft_res)) = driver.query(&ltft_query)
+            {
+                ltft = ltft_res;
+                log::info!("Updated ltft");
+                ltft_last_updated = time;
+                FreeRtos::delay_ms(50);
+            }
         }
 
-        let maf = driver.query(obd::PID::MassAirFlow);
+        let maf = driver.query(&maf_query);
         FreeRtos::delay_ms(50);
         time = timer.counter().unwrap() as f64 / timer_hz;
 
-        if let Ok(maf) = maf {
+        if let Ok(obd::ObdReadableData::Raw(maf)) = maf {
             // Only start timer once data is being read to avoid assuming a massive fuel usage if
             // the esp is booted before the car
             if !timer_enabled {
                 timer_enabled = true;
                 timer.enable(true).unwrap();
+
+                // Read diagnostic codes on startup
+                let codes = driver
+                    .query(&obd::ObdQuery::new(obd::ObdMode::QueryDTC, None))
+                    .expect("couldn't read DTC");
+                log::info!("Read DTC codes: {:#?}", codes);
+                FreeRtos::delay_ms(50);
+                time = timer.counter().unwrap() as f64 / timer_hz;
             }
 
             let usage = (maf * 3600.0) / ((14.7 * (1.0 + ((stft + ltft) / 100.0))) * 740.0);
@@ -165,9 +187,9 @@ fn main() {
             ltft_last_updated = 0.0;
             fuel_usage_last_updated = 0.0;
             timer.enable(false).unwrap();
+            timer_enabled = false;
         }
 
-        // UNTESTED
         ble_server
             .indicate(&fuel_usage_uuid, &liters_used.to_le_bytes())
             .unwrap();
